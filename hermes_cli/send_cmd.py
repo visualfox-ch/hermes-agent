@@ -234,7 +234,15 @@ def cmd_send(args: argparse.Namespace) -> None:
 
     # Routes to the platform adapter (bot-token path for built-ins, live-adapter path for plugin
     # platforms); takes the standard tool-call dict and returns a JSON string.
-    tool_args = {"action": "send", "target": target, "message": message}
+    edit_id = (getattr(args, "edit", None) or "").strip()
+    if edit_id and mentions:
+        _fail("hermes send: --edit cannot be combined with --mention.", _USAGE_EXIT)
+    if edit_id and not target.split(":", 1)[0].strip().lower() == "telegram":
+        _fail("hermes send: --edit is only supported for Telegram targets.", _USAGE_EXIT)
+    if edit_id and not edit_id.isdigit():
+        _fail("hermes send: --edit needs the numeric Telegram message_id (see `hermes send --json` output).", _USAGE_EXIT)
+    tool_args = {"action": "edit", "message_id": edit_id, "target": target, "message": message} if edit_id else {
+        "action": "send", "target": target, "message": message}
     if mentions:
         tool_args["mentions"] = mentions
     result = send_message_tool(tool_args)
@@ -256,6 +264,9 @@ _SEND_ARGUMENTS = (
     (("--mention",), dict(dest="mentions", action="append", default=None, metavar="PHONE_OR_JID", help=(
         "WhatsApp only: add a native participant mention. Repeat for multiple recipients; "
         "bare phone numbers are normalized to JIDs. Include each matching @<number> near the start of the message text."))),
+    (("--edit",), dict(metavar="MESSAGE_ID", default=None, help=(
+        "Telegram only: edit the already-sent message MESSAGE_ID in place instead of sending a new one. "
+        "Use the message_id from a previous `--json` send. Text must fit one message (4096 chars)."))),
     (("-l", "--list"), dict(dest="list_targets", action="store_true", default=False,
                             help="List available targets. Optional positional filter: `hermes send --list telegram`.")),
     (("-q", "--quiet"), dict(action="store_true", default=False, help="Suppress stdout on success (exit code only).")),
@@ -286,6 +297,7 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "  hermes send --to slack:#eng --subject \"[CI]\" --file build.log\n"
             "  hermes send --to whatsapp:GROUP@g.us --mention 15551234567 \"@15551234567 hello\"\n"
             "  hermes send --to telegram \"MEDIA:./chart.png\"   # send a media attachment\n"
+            "  hermes send --to telegram:@example_channel --edit 4711 \"build 3/8\"   # edit in place (Telegram)\n"
             "  hermes send --list                  # all platforms\n"
             "  hermes send --list telegram         # filter by platform\n"
             "\n"

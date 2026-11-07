@@ -310,6 +310,49 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         return _error(f"Telegram send failed: {e}")
 
 
+async def _edit_telegram(token, chat_id, message_id, message, disable_link_previews=False):
+    """Edit one existing Telegram text message in place (``editMessageText``).
+
+    One message only: an edit cannot be chunked, so text over Telegram's 4096 UTF-16 units is an
+    error rather than silently truncated. "message is not modified" counts as success so a
+    script may re-apply the same text. Parse failures fall back to plain text like the send path.
+    """
+    try:
+        formatted, parse_mode, has_html = _telegram_format(message)
+        from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
+        from gateway.platforms.base import utf16_len
+        if utf16_len(formatted) > 4096:
+            return _error("Telegram edit failed: text exceeds 4096 characters (edits cannot be split)")
+        bot = _telegram_bot(token)
+        kwargs = {"chat_id": normalize_telegram_chat_id(chat_id), "message_id": int(message_id)}
+        if disable_link_previews:
+            kwargs["disable_web_page_preview"] = True
+
+        async def edit(text, mode):
+            return await bot.edit_message_text(text=text, parse_mode=mode, **kwargs)
+
+        try:
+            result = await edit(formatted, parse_mode)
+        except Exception as first:
+            lowered = str(first).lower()
+            if "not modified" in lowered:
+                return _success("telegram", chat_id, message_id=str(message_id), edited=True, unchanged=True)
+            if "parse" in lowered or "markdown" in lowered or "html" in lowered:
+                result = await edit(formatted if has_html else _strip_mdv2_safe(formatted), None)
+            else:
+                raise
+        new_id = getattr(result, "message_id", message_id)
+        return _success("telegram", chat_id, message_id=str(new_id), edited=True)
+    except ImportError:
+        return {"error": "python-telegram-bot not installed. Run: " f"{install_hint('telegram')}"}
+    except ValueError:
+        return _error("Telegram edit failed: message_id must be a numeric Telegram message id")
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return _success("telegram", chat_id, message_id=str(message_id), edited=True, unchanged=True)
+        return _error(f"Telegram edit failed: {e}")
+
+
 def _live_adapter(platform, *, lookup_failed_warning=None):
     """``(runner, adapter)`` for the in-process gateway; ``(None, None)`` standalone (cron);
     ``(runner, None)`` when the lookup fails — logged when a warning is given, never silently

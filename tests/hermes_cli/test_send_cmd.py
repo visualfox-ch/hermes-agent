@@ -459,3 +459,33 @@ def test_help_and_empty_list_hint_name_the_resolved_home(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert str(home / "channel_directory.json") in out
     assert "~/.hermes" not in out
+
+
+# ---------------------------------------------------------------------------
+# --edit (Telegram in-place edit)
+# ---------------------------------------------------------------------------
+
+
+def test_edit_routes_to_the_edit_action(fake_tool):
+    with pytest.raises(SystemExit) as exit_info:
+        send_cmd.cmd_send(_parse(["--to", "telegram:@example_channel", "--edit", "4711", "build 3/8"]))
+    assert exit_info.value.code == 0
+    assert fake_tool.calls == [{"action": "edit", "message_id": "4711", "target": "telegram:@example_channel", "message": "build 3/8"}]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--to", "discord:#ops", "--edit", "1", "x"],
+    ["--to", "telegram", "--edit", "abc", "x"],
+    ["--to", "telegram", "--edit", "1", "--mention", "+1 (555) 000-0001", "x"],
+])
+def test_edit_usage_errors_never_reach_the_tool(fake_tool, argv):
+    with pytest.raises(SystemExit) as exit_info:
+        send_cmd.cmd_send(_parse(argv))
+    assert exit_info.value.code == 2
+    assert fake_tool.calls == []
+
+
+def test_plain_send_is_unchanged_without_edit(fake_tool):
+    with pytest.raises(SystemExit):
+        send_cmd.cmd_send(_parse(["--to", "telegram", "hello"]))
+    assert fake_tool.calls[0]["action"] == "send" and "message_id" not in fake_tool.calls[0]

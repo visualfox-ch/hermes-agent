@@ -18,7 +18,7 @@ from tools.send_message_senders import (
     _AUDIO_EXTS, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _NO_DELIVERABLE, _VIDEO_EXTS, _VOICE_EXTS,
     _adapter_media_method, _error, _live_adapter, _media_caption_split, _plugin_standalone_sender,
     _registry_standalone_send, _resolve_slack_user_target, _sanitize_error_text,
-    _send_matrix_via_adapter, _send_telegram)
+    _send_matrix_via_adapter, _send_telegram, _edit_telegram)
 from tools.registry import tool_error
 
 # A bare Slack user id (session metadata / home-channel config) is opened as a DM; same shape the
@@ -43,7 +43,50 @@ def send_message_tool(args, **kw):
         return _handle_list()
     if action in ("react", "unreact"):
         return _handle_react(args, remove=action == "unreact")
+    if action == "edit":
+        return _handle_edit(args)
     return _handle_send(args)
+
+
+def _handle_edit(args):
+    """Edit a previously sent message in place. Telegram only (bot-token path, no live adapter)."""
+    target, message = args.get("target", ""), args.get("message", "")
+    message_id = str(args.get("message_id") or "").strip()
+    if not target or not message or not message_id:
+        return tool_error("'target', 'message' and 'message_id' are required when action='edit'")
+    if target.partition(":")[0].strip().lower() != "telegram":
+        return tool_error("action='edit' is only supported for telegram targets")
+    from agent.message_sanitization import _sanitize_surrogates
+    message = _sanitize_surrogates(message)
+    platform_name, chat_id, thread_id, resolution_error = _resolve_tool_target(target)
+    if resolution_error:
+        return tool_error(resolution_error)
+    try:
+        from gateway.config import load_gateway_config
+        config = load_gateway_config()
+    except Exception as e:
+        return json.dumps(_error(f"Failed to load gateway config: {e}"))
+    platform, pconfig, _entry, err = _resolve_platform_config(platform_name, config)
+    if err:
+        return tool_error(err)
+    if not chat_id:
+        chat_id, err = _home_chat_id(config, platform, platform_name)
+        if err:
+            return tool_error(err)
+    # Same egress-authorization floor as send: an edit rewrites a message in a named destination.
+    denial = _authorize_relay_target(platform_name, chat_id, thread_id, native_token=getattr(pconfig, "token", None))
+    if denial:
+        return tool_error(denial)
+    try:
+        from model_tools import _run_async
+        result = _run_async(_edit_telegram(
+            pconfig.token, chat_id, message_id, message,
+            disable_link_previews=bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))))
+        if isinstance(result, dict) and "error" in result:
+            result["error"] = _sanitize_error_text(result["error"])
+        return json.dumps(result)
+    except Exception as e:
+        return json.dumps(_error(f"Edit failed: {e}"))
 
 
 def _resolve_tool_target(target: str, *, pass_unresolved_references: bool = False):
