@@ -193,6 +193,53 @@ class TestComposeGuard:
         assert payload["readiness"] is None
 
 
+class TestChildEnvironment:
+    """Phase/start commands get the terminal tool's child env, not os.environ."""
+
+    _SECRET = "TELEGRAM_BOT_TOKEN"  # Hermes-managed bot secret, always stripped
+
+    def _hermes_runtime_env(self, tmp_path, monkeypatch):
+        from tools.environments import local
+
+        hermes_sp = tmp_path / "hermes-venv" / "site-packages"
+        hermes_sp.mkdir(parents=True)
+        user_entry = str(tmp_path / "user-lib")
+        monkeypatch.setattr(local, "_hermes_site_packages", [hermes_sp])
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(hermes_sp), user_entry]))
+        monkeypatch.setenv(self._SECRET, "dummy-verify-secret")
+        monkeypatch.setenv("VERIFY_USER_VAR", "keep-me")
+        return str(hermes_sp), user_entry
+
+    def _probe(self) -> str:
+        return (
+            'echo "PP=$PYTHONPATH"; '
+            f'echo "SECRET=${{{self._SECRET}:-unset}}"; '
+            'echo "USER=$VERIFY_USER_VAR"'
+        )
+
+    def test_phase_command_env_is_filtered(self, tmp_path, monkeypatch):
+        hermes_sp, user_entry = self._hermes_runtime_env(tmp_path, monkeypatch)
+        result = run_verify(tmp_path, Recipe(name="x", test=[self._probe()]), skip_start=True)
+        assert result.ok
+        out = result.phases[0].output_tail
+        assert hermes_sp not in out
+        assert f"PP={user_entry}" in out
+        assert "SECRET=unset" in out
+        assert "dummy-verify-secret" not in out
+        assert "USER=keep-me" in out
+
+    def test_start_command_env_is_filtered(self, tmp_path, monkeypatch):
+        hermes_sp, user_entry = self._hermes_runtime_env(tmp_path, monkeypatch)
+        recipe = Recipe(name="x", start=self._probe() + "; sleep 30", port=_free_port())
+        result = run_verify(tmp_path, recipe, phases=("start",), ready_timeout=1.5)
+        out = result.readiness.output_tail
+        assert hermes_sp not in out
+        assert f"PP={user_entry}" in out
+        assert "SECRET=unset" in out
+        assert "dummy-verify-secret" not in out
+        assert "USER=keep-me" in out
+
+
 def _free_port() -> int:
     import socket
 

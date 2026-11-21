@@ -3,7 +3,10 @@ readiness loop -> teardown (scoped port of grok-cli's verify flow).
 
 Commands come from the project's own recipe and run with ``shell=True`` on
 purpose: a developer tool running the project's own build commands in its own
-checkout — the same trust level as the terminal tool.
+checkout — the same trust level as the terminal tool. They also get the
+terminal tool's child environment (:func:`_project_child_env`): the Hermes
+process environment carries its own PYTHONPATH/venv markers and Hermes-managed
+secrets, none of which belong to the project under verification.
 """
 
 from __future__ import annotations
@@ -53,6 +56,21 @@ class PhaseResult:
         }
 
 
+
+def _project_child_env() -> dict[str, str]:
+    """Environment for project-authored phase/start commands.
+
+    Delegates to the shared spawn-env factory the terminal tool uses, so the project
+    sees the user's normal environment (PATH, HOME, user PYTHONPATH entries) but not
+    Hermes-owned PYTHONPATH entries, venv markers or Hermes-managed secrets. Without
+    it a project on another Python imports the Hermes venv's C extensions (e.g.
+    ``pydantic_core``) and its test collection fails.
+    """
+    from tools.environments.local import build_subprocess_env
+
+    return build_subprocess_env()
+
+
 @dataclass
 class ReadinessResult:
     url: str
@@ -97,7 +115,10 @@ def _run_phase_command(
 ) -> PhaseResult:
     started = time.monotonic()
     try:
-        proc = subprocess.run(command, cwd=str(root), timeout=timeout, **_SUBPROCESS_KW, check=False)
+        proc = subprocess.run(
+            command, cwd=str(root), timeout=timeout, env=_project_child_env(),
+            **_SUBPROCESS_KW, check=False,
+        )
         output, exit_code, timed_out = proc.stdout or "", proc.returncode, False
     except subprocess.TimeoutExpired as exc:
         raw = exc.output
@@ -175,7 +196,10 @@ def _run_start_phase(
     started = time.monotonic()
     # Owned: the app leads its own group (clean group teardown below) and that group dies with this
     # process if it is killed mid-poll, instead of leaving the dev server running on the port.
-    proc = spawn_owned(recipe.start, purpose="verify-app", cwd=str(root), **_SUBPROCESS_KW)
+    proc = spawn_owned(
+        recipe.start, purpose="verify-app", cwd=str(root), env=_project_child_env(),
+        **_SUBPROCESS_KW,
+    )
     output = ""
     try:
         ready, status, error = _poll_readiness(url, ready_timeout)
